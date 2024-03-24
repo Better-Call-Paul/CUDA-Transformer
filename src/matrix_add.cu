@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
     cudaMemcpy(device_vector_a, host_vector_a, size, cudaMemcpyHostToDevice);
     cudaMemcpy(device_vector_b, host_vector_b, size, cudaMemcpyHostToDevice);
 
-    dim3 block_dimensions(32, 32, 32);
+    dim3 block_dimensions(8, 8, 8);
     dim3 block_quantity(
         (block_dimensions.x + N - 1) / block_dimensions.x,
         (block_dimensions.y + M - 1) / block_dimensions.y,
@@ -68,6 +68,13 @@ int main(int argc, char *argv[]) {
     );
 
     mat_add<<<block_quantity, block_dimensions>>>(device_vector_a, device_vector_b, device_vector_c, N, M, D);
+
+    cudaError_t error = cudaGetLastError();
+
+    if (error != cudaSuccess) {
+        fprintf(stderr, "Kernel Launch Failed: %s\n", cudaGetErrorString(error));
+        return -1;
+    }
 
     cudaDeviceSynchronize();
 
