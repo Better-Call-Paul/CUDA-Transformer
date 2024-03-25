@@ -22,6 +22,7 @@ void check_multiply_error_2d(float *a, float *b, float *c, int N) {
             assert(std::fabs(c[c_idx] - expected) < 1e-3);
         }
     }
+    std::cout << "Kernel Multiplication Valid" << "\n";
 }
 
 void check_multiply_error_3d(float *a, float *b, float *c, int N, int M, int D) {
