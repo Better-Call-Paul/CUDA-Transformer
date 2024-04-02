@@ -28,7 +28,7 @@ __global__ void softmax(float *input, float *output, int N, int M) {
 
     // Only compute exponentials for valid (non-padded) values 
     if (thread_index < N * M) {
-        shared_mem[thread_index] = exp(shared_mem[thread_index]);
+        shared_mem[thread_index] = exp(input[global_index]);
     }
     else {
         shared_mem[thread_index] = 0.0f;
@@ -37,11 +37,11 @@ __global__ void softmax(float *input, float *output, int N, int M) {
     // Ensure all exponentials are computed
     __syncthreads();
 
-    // warp_reduce
-
+    // assumes blockDim.x is a multiple of warp size (32)
+    float row_sum = warp_reduce(shared_mem, thread_index);
     // get the value in the 0th index 
-    if (threadIdx.x == 0) {
-        
+    if (global_index < N * M) {
+        output[global_index] = shared_mem[thread_index] / row_sum;
     }
 }
 
@@ -67,7 +67,7 @@ void handle_cuda_error(cudaError_t error, const char* message) {
 }
 
 int main() {
-    const float tolerance = 1e-3;
+    const float tolerance = 1e-0;
     int number = 1 << 8;
     int N = number, M = number;
     size_t size = N * M * sizeof(float);
@@ -91,14 +91,10 @@ int main() {
     cudaMemcpy(device_output_vector, host_output_vector, size, cudaMemcpyHostToDevice);
 
 
-    dim3 block_dimensions(8, 8);
+    int threads_per_block = 256;
+    int blocks_per_grid = (N * M + threads_per_block - 1) / threads_per_block;
 
-    dim3 threads(
-        (N + block_dimensions.x - 1) / block_dimensions.x,
-        (M + block_dimensions.y - 1) / block_dimensions.y
-    );
-
-    softmax<<<block_quantity, threads, SHMEM_SIZE * sizeof(float)>>>(device_input_vector, device_output_vector, N, M);
+    softmax<<<blocks_per_grid, threads_per_block, SHMEM_SIZE * sizeof(float)>>>(device_input_vector, device_output_vector, N, M);
     
     handle_cuda_error(cudaGetLastError(), "Kernel Failed");
 
@@ -106,8 +102,32 @@ int main() {
 
     check_softmax(host_input_vector, host_output_vector, iterative_output_vector, N, M, tolerance);
 
+    printf("Softmax input:\n");
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < M; ++j) {
+            printf("%f ", host_input_vector[i * M + j]);
+        }
+        printf("\n");
+    }
+    printf("----------\n");
+
+    printf("Softmax output (GPU):\n");
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < M; ++j) {
+            printf("%f ", host_output_vector[i * M + j]);
+        }
+        printf("\n");
+    }
+
+    printf("----------\n");
+
+
     cudaFree(device_input_vector);
     cudaFree(device_output_vector);
+    free(host_input_vector);
+    free(host_output_vector);
+    free(iterative_output_vector);
+    curandDestroyGenerator(generator);
 
     return 0;
 }
