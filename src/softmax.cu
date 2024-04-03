@@ -1,50 +1,69 @@
 #include <iostream>
 #include <cassert>
-#include <ctime>
-#include <cstdlib>
 #include <cmath>
 #include <curand.h>
+#include <cfloat>
 
-#define SHMEM_SIZE 256 
+#define SHMEM_SIZE 256
 
-__inline__ __device__ 
-float warp_reduce(volatile float* shmem_ptr, int thread_id) {
-    if (thread_id < 32) {
-        shmem_ptr[thread_id] += (thread_id + 32 < blockDim.x) ? shmem_ptr[thread_id + 32] : 0;
-        shmem_ptr[thread_id] += (thread_id + 16 < blockDim.x) ? shmem_ptr[thread_id + 16] : 0;
-        shmem_ptr[thread_id] += (thread_id + 8 < blockDim.x) ? shmem_ptr[thread_id + 8] : 0;
-        shmem_ptr[thread_id] += (thread_id + 4 < blockDim.x) ? shmem_ptr[thread_id + 4] : 0;
-        shmem_ptr[thread_id] += (thread_id + 2 < blockDim.x) ? shmem_ptr[thread_id + 2] : 0;
-        shmem_ptr[thread_id] += (thread_id + 1 < blockDim.x) ? shmem_ptr[thread_id + 1] : 0;
+
+template<typename T>
+__device__ T warpReduceMax(T val) {
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        val = max(val, __shfl_down_sync(0xffffffff, val, offset));
     }
-    return shmem_ptr[thread_id];
+    return val;
 }
 
-__global__ void softmax(float *input, float *output, int N, int M) {
-    
-    extern __shared__ float shared_mem[];
-    int thread_index = threadIdx.x;
-    int global_index = blockIdx.x * blockDim.x + threadIdx.x;
-
-    // Only compute exponentials for valid (non-padded) values 
-    if (thread_index < N * M) {
-        shared_mem[thread_index] = exp(input[global_index]);
+template<typename T>
+__device__ T warpReduceSum(T val) {
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
     }
-    else {
-        shared_mem[thread_index] = 0.0f;
-    }
+    return val;
+}
 
-    // Ensure all exponentials are computed
+template<typename T>
+__global__ void softmax(T *input, T *output, int N, int M) {
+    extern __shared__ T shared_data[];
+    int tid = threadIdx.x;
+    int row = blockIdx.x;
+
+    T max_val = -FLT_MAX;
+    T sum_val = 0;
+
+    // Find max
+    for(int i = tid; i < M; i += blockDim.x) {
+        max_val = max(max_val, input[row * M + i]);
+    }
+    max_val = warpReduceMax(max_val);
+
+    if (tid == 0) shared_data[blockIdx.x] = max_val;
     __syncthreads();
+    max_val = shared_data[blockIdx.x];
 
-    // assumes blockDim.x is a multiple of warp size (32)
-    float row_sum = warp_reduce(shared_mem, thread_index);
-    // get the value in the 0th index 
-    if (global_index < N * M) {
-        output[global_index] = shared_mem[thread_index] / row_sum;
+    // Compute sum of exp(input - max)
+    for(int i = tid; i < M; i += blockDim.x) {
+        sum_val += exp(input[row * M + i] - max_val);
+    }
+    sum_val = warpReduceSum(sum_val);
+
+    if(tid == 0) shared_data[blockIdx.x] = sum_val;
+    __syncthreads();
+    sum_val = shared_data[blockIdx.x];
+
+    // Write the result
+    for(int i = tid; i < M; i += blockDim.x) {
+        output[row * M + i] = exp(input[row * M + i] - max_val) / sum_val;
     }
 }
 
+void handle_cuda_error(cudaError_t err, const char* msg) {
+    if (err != cudaSuccess) {
+        std::cerr << msg << ": " << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
 void check_softmax(float *input, float *output, float *computed_output, int N, int M, const float tolerance) {
     for (int i = 0; i < N; i++) {
         float sum = 0.0f;
@@ -59,16 +78,9 @@ void check_softmax(float *input, float *output, float *computed_output, int N, i
     }
 }
 
-void handle_cuda_error(cudaError_t error, const char* message) {
-    if (error != cudaSuccess) {
-        std::cerr << message << ": " << cudaGetErrorString(error) << "\n";
-        exit(-1);
-    }
-}
-
 int main() {
-    const float tolerance = 1e-0;
-    int number = 1 << 8;
+    const float tolerance = 1e-5;
+    int number = 1 << 2;
     int N = number, M = number;
     size_t size = N * M * sizeof(float);
 
@@ -78,7 +90,7 @@ int main() {
     host_output_vector = (float*)malloc(size);
     iterative_output_vector = (float*)malloc(size);
     
-    // Populate host vectors
+    // Populate host vector
     curandGenerator_t generator;
     curandCreateGeneratorHost(&generator, CURAND_RNG_PSEUDO_DEFAULT);
     curandSetPseudoRandomGeneratorSeed(generator, (unsigned long long)clock());
@@ -88,10 +100,9 @@ int main() {
     cudaMalloc(&device_output_vector, size);
 
     cudaMemcpy(device_input_vector, host_input_vector, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(device_output_vector, host_output_vector, size, cudaMemcpyHostToDevice);
 
 
-    int threads_per_block = 256;
+    int threads_per_block = 8;
     int blocks_per_grid = (N * M + threads_per_block - 1) / threads_per_block;
 
     softmax<<<blocks_per_grid, threads_per_block, SHMEM_SIZE * sizeof(float)>>>(device_input_vector, device_output_vector, N, M);
@@ -101,26 +112,6 @@ int main() {
     cudaMemcpy(host_output_vector, device_output_vector, size, cudaMemcpyDeviceToHost);
 
     check_softmax(host_input_vector, host_output_vector, iterative_output_vector, N, M, tolerance);
-
-    printf("Softmax input:\n");
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < M; ++j) {
-            printf("%f ", host_input_vector[i * M + j]);
-        }
-        printf("\n");
-    }
-    printf("----------\n");
-
-    printf("Softmax output (GPU):\n");
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < M; ++j) {
-            printf("%f ", host_output_vector[i * M + j]);
-        }
-        printf("\n");
-    }
-
-    printf("----------\n");
-
 
     cudaFree(device_input_vector);
     cudaFree(device_output_vector);
