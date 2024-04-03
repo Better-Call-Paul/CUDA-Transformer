@@ -2,6 +2,7 @@
 #include <ctime>
 #include <cstdlib>
 #include <cassert>
+#include <cublas_v2.h>
 
 /*
  * 3d matrix addition
@@ -55,8 +56,26 @@ void check_addition_error_3d(float* a, float* b, float* c, int N, int M, int D) 
     std::cout << "CUDA kernel addition verified successfully." << "\n";
 }
 
+/*
+* For cublas 
+*/
+void cublas_vector_init(float *a, int N) {
+    for (int i = 0; i < N; i++) {
+        a[i] = static_cast<float>(rand()) / RAND_MAX;
+    }
+}
+
+void cublas_verify(float *a, float *b, float *c, float factor, int N) {
+    for (int i = 0; i < N; i++) {
+        assert(c[i] == factor * a[i] + b[i]);
+    }
+    std::cout << "Cublas CUDA kernel addition verified successfully." << "\n";
+}
+
 int main(int argc, char *argv[]) {
 
+    
+    // 3D Vector Addition
     srand(time(NULL));
     int number = 1 << 8;
     int N = number, M = number, D = number;
@@ -108,7 +127,7 @@ int main(int argc, char *argv[]) {
     cudaMemcpy(host_vector_c, device_vector_c, size, cudaMemcpyDeviceToHost);
 
     check_addition_error_3d(host_vector_a, host_vector_b, host_vector_c, N, M, D);
-    
+
 
     free(host_vector_a);
     free(host_vector_b);
@@ -117,6 +136,55 @@ int main(int argc, char *argv[]) {
     cudaFree(device_vector_a);
     cudaFree(device_vector_b);
     cudaFree(device_vector_c);
+
+    // end of 3D vector addition
+    
+
+    /*
+    // Cublas Version
+
+    int N = 1 << 2;
+    size_t bytes = N * sizeof(float);
+
+    float *host_vector_a, *host_vector_b, *host_vector_c;
+    float *device_vector_a, *device_vector_b;
+
+    host_vector_a = (float*)malloc(bytes);
+    host_vector_b = (float*)malloc(bytes);
+    host_vector_c = (float*)malloc(bytes);
+
+    cudaMalloc(&device_vector_a, bytes);
+    cudaMalloc(&device_vector_b, bytes);
+
+    cublas_vector_init(host_vector_a, N);
+    cublas_vector_init(host_vector_b, N);
+
+    cublasHandle_t handle;
+    cublasCreate_v2(&handle);
+
+    // copy host vectors to device instead of memcpy, last arg is step size
+    cublasSetVector(N, sizeof(float), host_vector_a, 1, device_vector_a, 1); 
+    cublasSetVector(N, sizeof(float), host_vector_b, 1, device_vector_b, 1); 
+
+    const float scale = 2.0f;
+    cublasSaxpy(handle, N, &scale, device_vector_a, 1, device_vector_b, 1);
+
+    // copy result vector out
+    cublasGetVector(N, sizeof(float), device_vector_b, 1, host_vector_c, 1);
+
+    cublas_verify(host_vector_a, host_vector_b, host_vector_c, scale, N);
+
+    cublasDestroy(handle);
+
+    cudaFree(device_vector_a);
+    cudaFree(device_vector_b);
+
+    free(host_vector_a);
+    free(host_vector_b);
+    free(host_vector_c);
+
+    // End of Cublas Version
+    */
 
     return 0;
 }
